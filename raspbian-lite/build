@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# Automatically ask for sudo if not already root
+if [ $( /usr/bin/id -u ) -ne 0 ]; then
+  exec sudo "$0" "$@"
+fi
+
+
+dir=$(dirname "$(readlink -f "$0")")
+os="raspbian_lite"
+version="2020-02-14"
+url="https://downloads.raspberrypi.org/${os}/images/${os}-${version}/"
+filename="2020-02-13-raspbian-buster-lite"
+image="bkblain/raspbian-lite"
+
+# download the zip
+if [ ! -e "${dir}/${filename}.zip" ]; then
+  curl -o "${dir}/${filename}.zip" "${url}/${filename}.zip"
+fi
+
+
+# download the sha256
+if [ ! -e "${dir}/${filename}.zip.sha256" ]; then
+  curl -o "${dir}/${filename}.zip.sha256" "${url}/${filename}.zip.sha256"
+fi
+
+
+# verify the sha
+sha=`sha256sum -c "${dir}/${filename}.zip.sha256"`
+if [[ ! "${sha}" == *"OK" ]]; then
+  echo "Could not verify SHA256"
+  exit $?
+fi
+
+
+# unzip the image
+if [ ! -e "${dir}/${filename}.img" ]; then
+  unzip "${dir}/${filename}.zip" -d "${dir}"
+  chown "${SUDO_USER}":"${SUDO_USER}" "${dir}/${filename}.img"
+fi
+
+
+# Mount the image in order to create a tarball
+tarImage() {
+  # create loopback device
+  loop=`losetup -f`
+  losetup -Pr "${loop}" "${dir}/${filename}.img"
+
+
+  # mount the loopback
+  mkdir -p "${dir}/${filename}"
+  mount -o ro "${loop}p2" "${dir}/${filename}"
+
+
+  # tar the mounted directory
+  find "${dir}/${filename}" -printf "%P\n" | \
+  tar -czpf "${dir}/${filename}.tar.gz" -C "${dir}/${filename}" \
+  --numeric-owner --no-recursion -T -
+
+  #tar -czpf "${dir}/${filename}.tar.gz" -C "${dir}/${filename}" --numeric-owner .
+
+  chown "${SUDO_USER}":"${SUDO_USER}" "${dir}/${filename}.tar.gz"
+}
+
+
+# Cleanuo the mount and loopback device
+cleanup() {
+  umount "${dir}/${filename}"
+  losetup -d "${loop}"
+  rm -rf "${dir}/${filename}"
+}
+
+
+if [ ! -e "${dir}/${filename}.tar.gz" ]; then
+  tarImage || { cleanup; exit $?; }
+  cleanup
+fi
+
+
+# create the docker image
+docker buildx build -t "${image}:${version}" -f "${dir}/Dockerfile" --platform linux/amd64,linux/arm64,linux/arm/v7 --build-arg file=${dir}/${filename}.tar.gz . --push
+
+
